@@ -1,0 +1,178 @@
+---
+title: "Upwelling GLM - Area Under the Cruve"
+author: "Gammon Koval"
+date: "2022-12-13"
+output:
+  html_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+# Script 4 - Assess LM on Area Under the Cruve Annual Data with Nearshore Cutoff
+
+```{r libraries, results = 'hide', warning = FALSE, message = FALSE, error = FALSE}
+#load libraries
+library(tidyverse)
+library(ggpubr)
+library(rstatix)
+library(broom)
+library(car)
+library(nlme)   
+library(gridExtra)
+library(emmeans)
+library(multcomp)
+library(MASS)
+library(interactions)
+library(lmtest)
+library(knitr)
+library(kableExtra)
+
+rm(list = ls())
+```
+
+# Regular Data
+
+## Data Preparation and Exploration 
+
+```{r data-prep-regular, out.width = '95%'}
+#read in data
+setwd('./Documents/GitHub/Garcia-Reyes_etal_2023_EBUSFootprint')
+upwelling <- read_csv('./data/upwellingfootprint_annualsummary_nearshore_Modified-Subregions.csv')
+
+#add columns for transforming the data and separate Region back into EBUS and subregion
+upwelling <- upwelling %>% 
+  separate(Random_name, into = c('EBUS', 'Subregion'), sep = '-')
+
+#add back in random factor
+upwelling$Random <- paste(upwelling$EBUS, upwelling$Subregion, sep = '-')
+
+#relabel EBUS factors
+upwelling$EBUS <- factor(upwelling$EBUS, levels = c('California', 'Humboldt', 'Iberian/Canary', 'Benguela'))
+upwelling$Subregion <- factor(upwelling$Subregion, levels = c('Equatorward', 'Central', 'Poleward'))
+
+#plot year vs percent grouped by EBUS and subregion
+ggplot(upwelling, aes(x = Year, y = Percent)) + 
+    geom_point() + 
+    facet_wrap(EBUS~Subregion, ncol = 3, scales = 'free_y') +
+    geom_smooth(method = 'lm', se = FALSE) + 
+    theme_bw()
+
+#plot percent data grouped by EBUS and subregion
+ggplot(upwelling, aes(x = Percent)) +
+  geom_density() + 
+  facet_wrap(EBUS ~ Subregion, ncol = 3, scales = 'free_y')
+
+```
+
+## Model Selection 
+
+The full model includes seven variables: 
+
+* 3 single interactions: Year, EBUS, and Subregion
+* 3 two-way interactions: Year & EBUS, Year & Subregion, and EBUS & Subregion
+* 1 three-way interaction: Year & EBUS & Subregion
+
+Though the full model is not the best model (the three-way interaction is non-signficiant), we want the trends from each EBUS/Subregion, we need to keep it in
+
+```{r final-model-regular}
+#run the final model
+MFinal <- lm(Percent ~ Year * EBUS * Subregion, data = upwelling)
+
+anova(MFinal)
+
+#view model output
+summary(MFinal)
+```
+
+The full model summary is dense and hard to understand, but includes the p-value for the whole model (2.2e-16) and an adjusted R-squared (0.6693). The way that categorical variables are included in the model require them to be coded as continuous (for example, California is 1, Benguela is 2, etc.), so in the output one of the EBUS is missing (in this case California) and for Subregion Equatorward is missing, which R sets as being the baseline. We know that the three way interaction isn't significant, but we can still extract the coefficients (slopes) from the model later in this script.
+
+## Model Diagnostics
+
+```{r diagnostics-regular, out.width = '95%'}
+#look at residuals
+par(mfrow = c(2,2))
+plot(MFinal)
+
+#check residuals for normality (p < 0.05 means the residuals aren't normal)
+shapiro_test(MFinal$residuals)
+
+#check for auto-correlation
+par(mfrow = c(1,1))
+acf(MFinal$residuals)
+
+#Breusch-Godfrey Test (p < 0.05 means there is autocorrelation)
+bgtest(upwelling$Percent~upwelling$Year, order=1)
+
+#look at distribution of residuals vs normal curve
+ggplot(data = upwelling, aes(x = MFinal$residuals)) +
+    geom_histogram(aes(y = ..density..), fill = 'steelblue', color = 'black') +
+    labs(title = 'Histogram of Residuals', x = 'Residuals', y = 'Density') + 
+    stat_function(fun = dnorm, args = list(mean = mean(MFinal$residuals), sd = sd(MFinal$residuals)), color = 'navy', size = 1, linetype = 'longdash')
+```
+
+The model seem to fit the data fine. There is still an issue with central skewed data (based on the Residuals vs Fitted graph in the upper left and the histogram of the residuals). It is possible to transform the data, but that's really more of a last step as then the model is much more difficult to interpret because it's on transformed data.
+
+## Post Hoc Tests 
+
+The following code outputs the slopes of the trends for EBUS * Subregion. It is also possible to do additional post-hoc tests, but since we don't care about that, I didn't include those trends.
+
+```{r post-hoc-regular, out.width = '95%'}
+#extracts trends and p-values from the models
+upwelling.emt <- as.data.frame(emtrends(MFinal, pairwise ~ EBUS * Subregion, var = "Year", mode = "df.error")$emtrends)
+
+upwelling.test <- as.data.frame(test(emtrends(MFinal, pairwise ~ EBUS * Subregion, var = "Year"))$emtrends)
+
+upwelling.posthoc <- dplyr::full_join(upwelling.emt, upwelling.test, by = c("EBUS", "Subregion", "Year.trend", 'SE', 'df'))
+
+#if you want to change the confidence intervals
+# upwelling.confi <- confint(upwelling.emt, adjust = "none", level = 0.90)
+
+#relabel EBUS factors
+upwelling.posthoc$EBUS <- factor(upwelling.posthoc$EBUS, levels = c('California', 'Humboldt', 'Iberian/Canary', 'Benguela'))
+upwelling.posthoc$Subregion <- factor(upwelling.posthoc$Subregion, levels = c('Equatorward', 'Central', 'Poleward'))
+
+upwelling.posthoc <- upwelling.posthoc[complete.cases(upwelling.posthoc), ]
+
+upwelling.posthoc %>% 
+  kbl() %>%
+  kable_styling()
+
+#plot trends with CIs
+ggplot(upwelling.posthoc, aes(x = Subregion, y = Year.trend, group = EBUS)) + 
+  geom_errorbar(aes(ymin=lower.CL, ymax=upper.CL), width=.2,
+               position=position_dodge(.9)) +
+  geom_point() +
+  facet_wrap(.~EBUS, ncol = 4, drop = TRUE) +
+  geom_hline(yintercept = 0, linetype = 'dashed', color = 'grey60') +
+  theme_bw() +
+  scale_x_discrete(guide = guide_axis(angle = 30)) +
+  ylab('Trend ± 95% CI') +
+  ggtitle('Trends for Area Under the Curve Indicator')
+
+write.csv(upwelling.posthoc, '../data/EBUS_glm_FullModel_Trends_Modified-Subregions.csv')
+
+#manually calculate slopes and intercepts
+upwelling %>% 
+    group_by(EBUS, Subregion) %>% 
+    do({
+      mod = lm(Percent ~ Year, data = .)
+      data.frame(Intercept = coef(mod)[1],
+                 Slope = coef(mod)[2])
+    })
+  
+```
+
+```{r predict-regular, out.width = '95%'}
+newdat <- upwelling %>% dplyr::select(c(EBUS, Subregion, Year))
+newdat$Predicted <- predict(MFinal, newdat,re.form=NA)
+newdat$Percent <- upwelling$Percent
+
+#plot the data
+ggplot(newdat, aes(x = Year)) + 
+    geom_point(aes(y = Percent), color = 'black') +
+    geom_line(aes(y = Predicted, color = EBUS), size = 1) + 
+    facet_wrap(EBUS~Subregion, ncol = 3, scales = 'free_y') + 
+    ggtitle("Predicted Values for EBUS and Subregion from Model") + 
+    theme_bw()
+```
+

@@ -1,0 +1,273 @@
+---
+title: "Upwelling GLM - Annual"
+author: "Gammon Koval"
+date: "2022-11-11"
+output:
+  word_document: default
+  html_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+# Script 5 - Assess GLS on Annual Data with Nearshore Cutoff
+
+Using the GLS function, we can build in an ARMA autocorrelation structure to the model.
+
+```{r libraries, results = 'hide', warning = FALSE, message = FALSE, error = FALSE}
+#load libraries
+library(tidyverse)
+library(ggpubr)
+library(rstatix)
+library(broom)
+library(car)
+library(nlme)   
+library(gridExtra)
+library(emmeans)
+library(multcomp)
+library(MASS)
+library(interactions)
+library(lmtest)
+library(orcutt)
+
+rm(list = ls())
+```
+
+## Annual Data
+
+### Data Preparation and Exploration 
+
+```{r data prep}
+#read in data
+setwd('./Documents/GitHub/Garcia-Reyes_etal_2023_EBUSFootprint')
+upwelling <- read_csv('./data/upwellingfootprint_annualsummary_nearshore_Modified-Subregions.csv')
+
+#add columns for transforming the data and separate Region back into EBUS and subregion
+upwelling <- upwelling %>% 
+  separate(Random_name, into = c('EBUS', 'Subregion'), sep = '-')
+
+#add back in random factor
+upwelling$Random <- paste(upwelling$EBUS, upwelling$Subregion, sep = '-')
+
+#relabel EBUS factors
+upwelling$EBUS <- factor(upwelling$EBUS, levels = c('California', 'Humboldt', 'Iberian/Canary', 'Benguela'))
+upwelling$Subregion <- factor(upwelling$Subregion, levels = c('Equatorward', 'Central', 'Poleward'))
+
+#plot year vs percent grouped by EBUS and subregion
+ggplot(upwelling, aes(x = Year, y = Percent)) + 
+    geom_point() + 
+    facet_wrap(EBUS~Subregion, ncol = 3, scales = 'free_y') +
+    geom_smooth(method = 'lm', se = FALSE) + 
+    theme_bw()
+
+#plot percent data grouped by EBUS and subregion
+ggplot(upwelling, aes(x = Percent)) +
+  geom_density() + 
+  facet_wrap(EBUS ~ Subregion, ncol = 3, scales = 'free_y')
+
+```
+
+### Base Model 
+
+```{r base-model}
+#run a linear model
+Mlm <- lm(Percent ~ Year * EBUS * Subregion, 
+             data = upwelling)
+
+#run the gls model with variance partitioned
+MBase <- gls(Percent ~ Year * EBUS * Subregion, 
+             weights = varIdent(form = ~ 1 | EBUS),
+             method = 'REML',
+             data = upwelling)
+
+#view model output
+anova(MBase)
+summary(MBase) #AIC 1586.597
+
+#look at residuals
+par(mfrow = c(2,2))
+plot(MBase)
+
+#another way to look at the residuals
+colvec <- c("#ff1111","#007eff") ## second colour matches lattice default
+grid.arrange(plot(MBase,type=c("p","smooth")),
+             plot(MBase,sqrt(abs(resid(.)))~fitted(.),
+                  type=c("p","smooth"),ylab=expression(sqrt(abs(resid)))),
+                                       ## "sqrt(abs(resid(x)))"),
+             plot(MBase,resid(.,type="pearson")~Year,
+                  type=c("p","smooth")),
+             qqnorm(MBase,abline=c(0,1)))
+
+
+#check residuals for normality (p < 0.05 means the residuals aren't normal)
+shapiro_test(MBase$residuals)
+
+#check for auto-correlation
+par(mfrow = c(1,1))
+acf(MBase$residuals)
+
+#Breusch-Godfrey Test (p < 0.05 means there is autocorrelation)
+bgtest(upwelling$Percent~upwelling$Year, order=1)
+```
+
+### Testing Correlation Structures
+
+```{r testing-correlation}
+#loop through a list of p's 
+for (q in 0:3) {
+  #loop through a list of q's
+  for (p in 0:3) {
+    #skip 0,0
+    if ((p == 0 & q == 0) | (p == 1 & q == 2)| (p == 1 & q == 3)) {
+      next
+    } else {
+      #test the model with the various ARMA parameters
+      MARMA <- gls(Percent ~ Year * EBUS * Subregion, 
+                   weights = varIdent(form = ~ 1 | EBUS),
+                   correlation = corARMA(form = ~ Year | EBUS/Subregion, 
+                                         p = p, q = q),
+                   method = 'REML',
+                   data = upwelling)
+      
+      #print the autocorrelation
+      print(paste(p, q, round(BIC(MARMA), 2)))
+    }
+  }
+}
+
+```
+
+Based on the BICs, ARMA(1, 0) is the best model. 
+
+### Best Model
+
+#### Run Model
+
+```{r best-model}
+#run the final model
+MFinal <- gls(Percent ~ Year * EBUS * Subregion,
+              weights = varIdent(form = ~ 1 | EBUS),
+              correlation = corARMA(form = ~ Year | EBUS/Subregion, p = 1, q = 0),
+              method = 'REML',
+              data = upwelling)
+
+#view model output
+anova(MFinal)
+summary(MFinal) #AIC 1523.395
+```
+
+#### Look at Residuals
+
+```{r best-residuals}
+#look at residuals
+par(mfrow = c(2,2))
+plot(MFinal)
+
+#another way to look at the residuals
+colvec <- c("#ff1111","#007eff") ## second colour matches lattice default
+grid.arrange(plot(MFinal,type=c("p","smooth")),
+             plot(MFinal,sqrt(abs(resid(.)))~fitted(.),
+                  type=c("p","smooth"),ylab=expression(sqrt(abs(resid)))),
+                                       ## "sqrt(abs(resid(x)))"),
+             plot(MFinal,resid(.,type="pearson")~Year,
+                  type=c("p","smooth")),
+             qqnorm(MFinal,abline=c(0,1)))
+
+
+#check residuals for normality (p < 0.05 means the residuals aren't normal)
+shapiro_test(MFinal$residuals)
+
+#check for auto-correlation
+par(mfrow = c(1,1))
+acf(residuals(MBase, type = 'normalized'))
+```
+
+
+#### Post Hoc Tests 
+
+The following code outputs the slopes of the trends for EBUS * Subregion. It is also possible to do additional post-hoc tests, but since we don't care about that, I didn't include those trends.
+
+```{r best-post-hoc}
+# emmeans_pwc = emmeans(MFinal, 'EBUS', by = 'Subregion', adjust = 'mvt')
+# summary(emmeans_pwc)
+
+#extracts trends from the linear model
+upwelling.emt <- as.data.frame(emtrends(Mlm, pairwise ~ EBUS * Subregion, var = "Year", mode = "df.error")$emtrends)
+
+upwelling.test <- as.data.frame(test(emtrends(Mlm, pairwise ~ EBUS * Subregion, var = "Year", mode =  "df.error"))$emtrends)
+
+upwelling.posthoc.lm <- dplyr::full_join(upwelling.emt, upwelling.test, by = c("EBUS", "Subregion", "Year.trend", 'SE', 'df'))
+
+upwelling.posthoc.lm$Model = 'lm'
+
+#extracts trends from the base model
+upwelling.emt <- as.data.frame(emtrends(MBase, pairwise ~ EBUS * Subregion, var = "Year", mode = "df.error")$emtrends)
+
+upwelling.test <- as.data.frame(test(emtrends(MBase, pairwise ~ EBUS * Subregion, var = "Year", mode =  "df.error"))$emtrends)
+
+upwelling.posthoc.base <- dplyr::full_join(upwelling.emt, upwelling.test, by = c("EBUS", "Subregion", "Year.trend", 'SE', 'df'))
+
+upwelling.posthoc.base$Model = 'gls'
+
+#extracts trends from the best model
+upwelling.emt <- as.data.frame(emtrends(MFinal, pairwise ~ EBUS * Subregion, var = "Year", mode = "df.error")$emtrends)
+
+upwelling.test <- as.data.frame(test(emtrends(MFinal, pairwise ~ EBUS * Subregion, var = "Year", mode =  "df.error"))$emtrends)
+
+upwelling.posthoc.final <- dplyr::full_join(upwelling.emt, upwelling.test, by = c("EBUS", "Subregion", "Year.trend", 'SE', 'df'))
+
+upwelling.posthoc.final$Model = 'gls + autocorrelation'
+
+#join 
+upwelling.posthoc <- rbind(rbind(upwelling.posthoc.base, upwelling.posthoc.final), upwelling.posthoc.lm)
+
+#relabel EBUS factors
+upwelling.posthoc$EBUS <- factor(upwelling.posthoc$EBUS, levels = c('California', 'Humboldt', 'Iberian/Canary', 'Benguela'))
+upwelling.posthoc$Subregion <- factor(upwelling.posthoc$Subregion, levels = c('Equatorward', 'Central', 'Poleward'))
+
+###plot comparing base model with autocorrelation model
+#plot trends with CIs
+upwelling.posthoc %>% 
+  dplyr::filter(Model != 'lm') %>% 
+  ggplot(aes(x = Subregion, y = Year.trend, group = EBUS, color = Model)) + 
+  geom_errorbar(aes(ymin=lower.CL, ymax=upper.CL), width=.2,
+               position=position_dodge(.9)) +
+  geom_point() +
+  facet_wrap(.~EBUS, ncol = 4) +
+  geom_hline(yintercept = 0, linetype = 'dashed', color = 'grey60') +
+  theme_bw() +
+  ylab('Trend ± 95% CI') +
+  ggtitle('Trends for Area Under the Curve Indicator')
+
+#manually calculate slopes and intercepts
+upwelling %>% 
+    group_by(EBUS, Subregion) %>% 
+    do({
+      mod = lm(Percent ~ Year, data = .)
+      data.frame(Intercept = coef(mod)[1],
+                 Slope = coef(mod)[2])
+    })
+
+upwelling.posthoc %>% dplyr::filter(Model == 'lm') %>% view()
+```
+
+### Predicted
+
+Look at the predicted model output from the final model (with variance partitioned and autocorrelation structure) vs just a basic linear regression.
+
+```{r best-predict}
+newdat <- upwelling %>% dplyr::select(c(EBUS, Subregion, Year))
+newdat$Predicted <- predict(MFinal, newdat,re.form=NA)
+newdat$Percent <- upwelling$Percent
+
+#plot the data
+ggplot(newdat, aes(x = Year)) + 
+    geom_point(aes(y = Percent), color = 'black') +
+    geom_line(aes(y = Predicted, color = EBUS), size = 1) + 
+    geom_smooth(aes(y = Percent), method = 'lm', se = FALSE, 
+                size = 0.5, linetype = 'dashed') +
+    facet_wrap(EBUS~Subregion, ncol = 3, scales = 'free_y') + 
+    ggtitle("Predicted (colored lines) vs Linear Regression 
+            (blue, dashed lines) for EBUS and Subregion") + 
+    theme_bw()
+```
+

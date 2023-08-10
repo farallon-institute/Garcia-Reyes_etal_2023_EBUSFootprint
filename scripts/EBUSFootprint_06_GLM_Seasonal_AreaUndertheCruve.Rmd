@@ -1,0 +1,178 @@
+---
+title: "Upwelling GLM - Seasonal Means"
+author: "Gammon Koval"
+date: "2022-12-13"
+output:
+  html_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+# Script 6 - Assess GLM on the Seasonal SST Footprint Data 
+
+```{r libraries, results = 'hide', warning = FALSE, message = FALSE, error = FALSE}
+#load libraries
+library(tidyverse)
+library(lubridate)
+library(ggpubr)
+library(rstatix)
+library(broom)
+library(car)
+library(nlme)   
+library(gridExtra)
+library(emmeans)
+library(multcomp)
+library(MASS)
+library(interactions)
+library(lmtest)
+library(knitr)
+library(kableExtra)
+
+rm(list = ls())
+```
+
+## Data Preparation and Exploration 
+
+```{r data-prep-regular, out.width = '95%'}
+#read in data
+setwd('./Documents/GitHub/Garcia-Reyes_etal_2023_EBUSFootprint')
+upwelling <- read_csv('./data/upwellingfootprint_seasonal_nearshore_Modified-Subregions.csv')
+
+#separate the Random_name variable on the - 
+upwelling <- upwelling %>% 
+  separate(Random_name, c('EBUS', 'Subregion'), '-')
+
+#replace the '-' in Iberian-Canary with '/'
+upwelling$EBUS <- gsub("-", "/", upwelling$EBUS) 
+  
+#add back in random factor
+upwelling$Random <- paste(upwelling$EBUS, upwelling$Subregion, sep = '-')
+
+#create a column of named seasons
+upwelling$Season <- NA
+for (i in 1:length(upwelling$Season_month)) {
+  if (upwelling$EBUS[i] %in% c('California', 'Iberian/Canary')) {
+    if (upwelling$Season_month[i] == 6){
+      upwelling[i,]$Season = 'Summer'
+    } else if (upwelling$Season_month[i] == 9){
+      upwelling[i,]$Season = 'Fall'
+    } else if (upwelling$Season_month[i] == 12){
+      upwelling[i,]$Season = 'Winter'
+    } else {
+      upwelling[i,]$Season = 'Spring'
+    }
+  } else {
+    if (upwelling$Season_month[i] == 6){
+      upwelling[i,]$Season = 'Winter'
+    } else if (upwelling$Season_month[i] == 9){
+      upwelling[i,]$Season = 'Spring'
+    } else if (upwelling$Season_month[i] == 12){
+      upwelling[i,]$Season = 'Summer'
+    } else {
+      upwelling[i,]$Season = 'Fall'
+    }
+  }
+}
+
+#relabel EBUS factors
+upwelling$EBUS <- factor(upwelling$EBUS, levels = c('California', 'Humboldt', 'Iberian/Canary', 'Benguela'))
+upwelling$Subregion <- factor(upwelling$Subregion, levels = c('Equatorward', 'Central', 'Poleward'))
+upwelling$Season <- factor(upwelling$Season, levels = c('Winter', 'Spring', 'Summer', 'Fall'))
+
+#plot year vs percent grouped by EBUS and subregion
+ggplot(upwelling, aes(x = Year, y = Percent, group = Season, color = Season)) + 
+    geom_point() + 
+    facet_wrap(EBUS~Subregion, ncol = 3, scales = 'free_y') +
+    geom_smooth(method = 'lm', se = FALSE) + 
+    theme_bw()
+
+#plot percent data grouped by EBUS and subregion
+ggplot(upwelling, aes(x = Percent, group = Season, color = Season)) +
+  geom_density() + 
+  facet_wrap(EBUS ~ Subregion, ncol = 3, scales = 'free_y')
+
+```
+
+## Run the Model 
+
+The full model includes seven variables: 
+
+* 4 single interactions: Year, EBUS, Subregion, and Season
+* 6 two-way interactions: Year & EBUS, Year & Subregion, EBUS & Subregion, Year & Season, EBUS & Season, and Subregion & Season 
+* 4 three-way interactions: Year & EBUS & Subregion, Year & EBUS & Season, Year & Subregion & Season, and EBUS & Subregion & Season
+* 1 four-way interaction: Year & EBUS & Subregion & Season
+
+```{r final-model-regular}
+#run the final model
+MFinal <- lm(Percent ~ Year * EBUS * Subregion * Season, data = upwelling)
+
+anova(MFinal)
+
+#view model output
+summary(MFinal)
+```
+
+The full model is significant (p < 0.05) with an adjusted r-squared of 0.06. Year, Year:EBUS, and Year:Subregion were all significant with Year:Season being slightly significant (p < 0.01). 
+
+## Model Diagnostics
+
+```{r diagnostics-regular, out.width = '95%'}
+#look at residuals
+par(mfrow = c(2,2))
+plot(MFinal)
+
+#check residuals for normality (p < 0.05 means the residuals aren't normal)
+shapiro_test(MFinal$residuals)
+
+#check for auto-correlation
+par(mfrow = c(1,1))
+acf(MFinal$residuals)
+
+#Breusch-Godfrey Test (p < 0.05 means there is autocorrelation)
+bgtest(upwelling$Percent~upwelling$Year, order=1)
+
+ggplot(data = upwelling, aes(x = MFinal$residuals)) +
+    geom_histogram(aes(y = ..density..), fill = 'steelblue', color = 'black') +
+    labs(title = 'Histogram of Residuals', x = 'Residuals', y = 'Density') + 
+    stat_function(fun = dnorm, args = list(mean = mean(MFinal$residuals), sd = sd(MFinal$residuals)), color = 'navy', size = 1, linetype = 'longdash')
+```
+
+The model seem to fit the data fine. It doesn't pass the Shapiro normality test, but looking at the histogram it is very normal, but there is a strong amount of autocorrelation. Though I'm not sure how this if factored in now that season is included in the model. 
+
+## Post Hoc Tests 
+
+### Four-Way Interaction
+
+```{r four-way-interaction, out.width = '95%'}
+#extracts trends and p-values from the models
+upwelling.emt <- as.data.frame(emtrends(MFinal, pairwise ~ EBUS * Subregion * Season, var = "Year")$emtrends)
+
+upwelling.test <- as.data.frame(test(emtrends(MFinal, pairwise ~ EBUS * Subregion * Season, var = "Year"))$emtrends)
+
+upwelling.posthoc <- dplyr::full_join(upwelling.emt, upwelling.test, by = c("EBUS", "Subregion", "Season", "Year.trend", 'SE', 'df'))
+
+#drop NAs
+upwelling.posthoc <- upwelling.posthoc[complete.cases(upwelling.posthoc), ]
+write.csv(upwelling.posthoc, './data/seasonal_trends_percent_Modified-Subregions_new.csv', row.names = FALSE)
+
+#view data
+upwelling.posthoc %>% 
+  kbl() %>%
+  kable_styling()
+
+#Order EBUS and Subregion factors
+upwelling.posthoc$EBUS <- factor(upwelling.posthoc$EBUS, levels = c('California', 'Humboldt', 'Iberian/Canary', 'Benguela'))
+upwelling.posthoc$Subregion <- factor(upwelling.posthoc$Subregion, levels = c('Equatorward', 'Central', 'Poleward'))
+
+#plot trends with CIs
+ggplot(upwelling.posthoc, aes(x = Season, y = Year.trend)) + 
+  geom_errorbar(aes(ymin=lower.CL, ymax=upper.CL), width=.2,
+               position=position_dodge(.9)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = 'dashed', color = 'grey60') +
+  theme_bw() +
+  facet_wrap(EBUS ~ Subregion, ncol = 3) + 
+  ylab('Trend ± 95% CI') +
+  ggtitle('Trends for Season Seasonal Means')
+```
+
